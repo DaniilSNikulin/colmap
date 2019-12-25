@@ -211,10 +211,28 @@ void LoadSiftFeaturesFromTextFile(const std::string& path,
                                   FeatureDescriptors* descriptors);
 
 // Match the given SIFT features on the CPU.
+class FlannMatchWrapperImpl;
+class FlannMatchWrapper {
+  public:
+    FlannMatchWrapper(const FeatureDescriptors& dataset);
+    void query(const FeatureDescriptors& query_data,
+               Eigen::Matrix<int, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> * indices,
+               Eigen::Matrix<int, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> * distances) const;
+    void query(const FlannMatchWrapper& query_data_box,
+               Eigen::Matrix<int, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> * indices,
+               Eigen::Matrix<int, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> * distances) const;
+  private:
+    std::shared_ptr<FlannMatchWrapperImpl> impl;
+};
+
 void MatchSiftFeaturesCPUBruteForce(const SiftMatchingOptions& match_options,
                                     const FeatureDescriptors& descriptors1,
                                     const FeatureDescriptors& descriptors2,
                                     FeatureMatches* matches);
+void MatchSiftFeaturesCPUFLANN(const SiftMatchingOptions& match_options,
+                               const FlannMatchWrapper& flann_matcher1,
+                               const FlannMatchWrapper& flann_matcher2,
+                               FeatureMatches* matches);
 void MatchSiftFeaturesCPUFLANN(const SiftMatchingOptions& match_options,
                                const FeatureDescriptors& descriptors1,
                                const FeatureDescriptors& descriptors2,

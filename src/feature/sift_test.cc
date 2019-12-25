@@ -41,6 +41,8 @@
 #include "util/opengl_utils.h"
 #include "util/random.h"
 
+#include <fstream>
+
 using namespace colmap;
 
 void CreateImageWithSquare(const int size, Bitmap* bitmap) {
@@ -427,6 +429,48 @@ BOOST_AUTO_TEST_CASE(TestMatchSiftFeaturesCPUFLANNvsBruteForce) {
     const size_t num_matches2 =
       TestFLANNvsBruteForce(match_options, descriptors1, descriptors2);
     BOOST_CHECK_EQUAL(num_matches2, 98);
+  }
+}
+
+BOOST_AUTO_TEST_CASE(TestMatchSiftFeaturesCPUPerfomanceFLANNvsBruteForce) {
+  const int min_amount_points = 100;
+  const int max_amount_points = 3000;
+  std::ofstream ofs("TestPerfomanceMatchingFLANNvsBruteForce.csv");
+  ofs << "amount,brute_force_time,flann_time,flann_build_time,flann_query_time\n";
+  for (int amount_points = min_amount_points; amount_points < max_amount_points; amount_points *= 2) {
+    FeatureDescriptors descriptors1 = CreateRandomFeatureDescriptors(amount_points);
+    FeatureDescriptors descriptors2 = CreateRandomFeatureDescriptors(amount_points);
+    FeatureMatches matches_bf, matches_flann;
+    double time_bf, time_build_flann, time_query_flann;
+
+    {
+      const auto start = std::chrono::high_resolution_clock::now();
+      MatchSiftFeaturesCPUBruteForce(SiftMatchingOptions(), descriptors1, descriptors2, &matches_bf);
+      const auto end = std::chrono::high_resolution_clock::now();
+      const std::chrono::duration<double> diff = end-start;
+      time_bf = diff.count();
+    }
+    {
+      auto start = std::chrono::high_resolution_clock::now();
+      FlannMatchWrapper fm1(descriptors1), fm2(descriptors2);
+      auto end = std::chrono::high_resolution_clock::now();
+      std::chrono::duration<double> diff = end-start;
+      time_build_flann = diff.count();
+
+      start = std::chrono::high_resolution_clock::now();
+      MatchSiftFeaturesCPUFLANN(SiftMatchingOptions(), fm1, fm2, &matches_flann);
+      end = std::chrono::high_resolution_clock::now();
+      diff = end-start;
+      time_query_flann = diff.count();
+    }
+    CheckEqualMatches(matches_bf, matches_flann);
+
+    ofs << amount_points << ","
+      << time_bf << ","
+      << (time_build_flann + time_query_flann) << ","
+      << time_build_flann << ","
+      << time_query_flann
+      << std::endl;
   }
 }
 

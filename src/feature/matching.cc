@@ -240,6 +240,11 @@ void FeatureMatcherCache::Setup() {
       cache_size_, [this](const image_t image_id) {
         return database_->ReadDescriptors(image_id);
       }));
+
+  flann_match_cache_.reset(new LRUCache<image_t, FlannMatchWrapper>(
+        cache_size_, [this](const image_t image_id) {
+          return FlannMatchWrapper(descriptors_cache_->Get(image_id));
+        }));
 }
 
 const Camera& FeatureMatcherCache::GetCamera(const camera_t camera_id) const {
@@ -260,6 +265,11 @@ const FeatureDescriptors& FeatureMatcherCache::GetDescriptors(
     const image_t image_id) {
   std::unique_lock<std::mutex> lock(database_mutex_);
   return descriptors_cache_->Get(image_id);
+}
+const FlannMatchWrapper& FeatureMatcherCache::GetFlannMatcher(
+    const image_t image_id) {
+  std::unique_lock<std::mutex> lock(database_mutex_);
+  return flann_match_cache_->Get(image_id);
 }
 
 FeatureMatches FeatureMatcherCache::GetMatches(const image_t image_id1,
@@ -345,11 +355,11 @@ void SiftCPUFeatureMatcher::Run() {
     if (input_job.IsValid()) {
       auto data = input_job.Data();
 
-      const FeatureDescriptors descriptors1 =
-          cache_->GetDescriptors(data.image_id1);
-      const FeatureDescriptors descriptors2 =
-          cache_->GetDescriptors(data.image_id2);
-      MatchSiftFeaturesCPU(options_, descriptors1, descriptors2, &data.matches);
+      const FlannMatchWrapper & flann_matcher1 =
+          cache_->GetFlannMatcher(data.image_id1);
+      const FlannMatchWrapper & flann_matcher2 =
+          cache_->GetFlannMatcher(data.image_id2);
+      MatchSiftFeaturesCPUFLANN(options_, flann_matcher1, flann_matcher2, &data.matches);
 
       CHECK(output_queue_->Push(data));
     }

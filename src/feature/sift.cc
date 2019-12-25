@@ -203,42 +203,6 @@ Eigen::MatrixXi ComputeSiftDistanceMatrix(
 }
 
 
-void FlannMatch(const FeatureDescriptors& query,
-                const FeatureDescriptors& dataset,
-                Eigen::Matrix<int, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> * indices,
-                Eigen::Matrix<int, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> * distances) {
-  const size_t knn = 2;
-  const size_t amountTreesInForest = 4;
-  Eigen::Matrix<int, Eigen::Dynamic, 128, Eigen::RowMajor> query_int = query.cast<int>();
-  Eigen::Matrix<int, Eigen::Dynamic, 128, Eigen::RowMajor> dataset_int = dataset.cast<int>();
-
-  indices->resize(query.rows(), std::min<int>(knn, dataset.rows()));
-  distances->resize(query.rows(), std::min<int>(knn, dataset.rows()));
-  const flann::Matrix<int> data1(query_int.data(), query.rows(), 128);
-  const flann::Matrix<int> data2(dataset_int.data(), dataset.rows(), 128);
-
-  // boundary condition
-  if (query.rows() == 0 || dataset.rows() == 0) {
-    return;
-  }
-
-  //query
-  flann::Matrix<int> f_indices(indices->data(), query.rows(), knn);
-  flann::Matrix<float> f_distances(new float[query.rows()*knn], query.rows(), knn);
-  flann::Index<flann::L2<int>> index(data2, flann::KDTreeIndexParams(amountTreesInForest));
-  index.buildIndex();
-  index.knnSearch(data1, f_indices, f_distances, knn, flann::SearchParams(128));
-  delete[] f_distances.ptr();
-
-  for (Eigen::MatrixXi::Index d1_idx = 0; d1_idx < indices->rows(); ++d1_idx) {
-    for (int n_idx = 0; n_idx < indices->cols(); ++n_idx) {
-      const int d2_idx = indices->coeff(d1_idx, n_idx);
-      distances->coeffRef(d1_idx, n_idx) = query_int.row(d1_idx).dot(dataset_int.row(d2_idx));
-    }
-  }
-}
-
-
 size_t FindBestMatchesOneWay(const Eigen::Matrix<int, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>& indices,
                              const Eigen::Matrix<int, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>& distances,
                              const float max_ratio, const float max_distance,
@@ -946,6 +910,71 @@ void LoadSiftFeaturesFromTextFile(const std::string& path,
 }
 
 
+
+struct FlannMatchWrapperImpl {
+  const FeatureDescriptors dataset;
+  Eigen::Matrix<int, Eigen::Dynamic, 128, Eigen::RowMajor> dataset_int;
+  const flann::Matrix<int> flann_dataset;
+  flann::Index<flann::L2<int>> index;
+  static const size_t amountTreesInForest = 4;
+  mutable std::mutex mtx;
+
+  FlannMatchWrapperImpl(const FeatureDescriptors& dataset)
+    : dataset(dataset),
+      dataset_int(dataset.cast<int>()),
+      flann_dataset(dataset_int.data(), dataset.rows(), 128),
+      index(flann_dataset, flann::KDTreeIndexParams(amountTreesInForest))
+  {}
+};
+
+FlannMatchWrapper::FlannMatchWrapper(const FeatureDescriptors& dataset)
+  : impl(std::make_shared<FlannMatchWrapperImpl>(dataset))
+{
+  if (impl->dataset.rows() > 0) {
+    impl->index.buildIndex();
+  }
+}
+
+void FlannMatchWrapper::query(const FeatureDescriptors& query_data,
+                              Eigen::Matrix<int, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> * indices,
+                              Eigen::Matrix<int, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> * distances) const {
+
+  const size_t knn = 2;
+  Eigen::Matrix<int, Eigen::Dynamic, 128, Eigen::RowMajor> query_int = query_data.cast<int>();
+  const flann::Matrix<int> data1(query_int.data(), query_int.rows(), 128);
+
+  indices->resize(query_int.rows(), std::min<int>(knn, impl->dataset_int.rows()));
+  distances->resize(query_int.rows(), std::min<int>(knn, impl->dataset_int.rows()));
+
+  // boundary condition
+  if (query_int.rows() == 0 || impl->dataset_int.rows() == 0) {
+    return;
+  }
+
+  //query
+  flann::Matrix<int> f_indices(indices->data(), query_int.rows(), knn);
+  flann::Matrix<float> f_distances(new float[query_int.rows()*knn], query_int.rows(), knn);
+  {
+    std::unique_lock<std::mutex> lock(impl->mtx);
+    impl->index.knnSearch(data1, f_indices, f_distances, knn, flann::SearchParams(128));
+  }
+  delete[] f_distances.ptr();
+
+  for (Eigen::MatrixXi::Index d1_idx = 0; d1_idx < indices->rows(); ++d1_idx) {
+    for (int n_idx = 0; n_idx < indices->cols(); ++n_idx) {
+      const int d2_idx = indices->coeff(d1_idx, n_idx);
+      distances->coeffRef(d1_idx, n_idx) = query_int.row(d1_idx).dot(impl->dataset_int.row(d2_idx));
+    }
+  }
+}
+
+void FlannMatchWrapper::query(const FlannMatchWrapper& query_data_box,
+                              Eigen::Matrix<int, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> * indices,
+                              Eigen::Matrix<int, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> * distances) const {
+  query(query_data_box.impl->dataset, indices, distances);
+}
+
+
 void MatchSiftFeaturesCPUBruteForce(const SiftMatchingOptions& match_options,
                                     const FeatureDescriptors& descriptors1,
                                     const FeatureDescriptors& descriptors2,
@@ -961,8 +990,8 @@ void MatchSiftFeaturesCPUBruteForce(const SiftMatchingOptions& match_options,
 }
 
 void MatchSiftFeaturesCPUFLANN(const SiftMatchingOptions& match_options,
-                               const FeatureDescriptors& descriptors1,
-                               const FeatureDescriptors& descriptors2,
+                               const FlannMatchWrapper& flann_matcher1,
+                               const FlannMatchWrapper& flann_matcher2,
                                FeatureMatches* matches) {
   CHECK(match_options.Check());
   CHECK_NOTNULL(matches);
@@ -972,9 +1001,9 @@ void MatchSiftFeaturesCPUFLANN(const SiftMatchingOptions& match_options,
   Eigen::Matrix<int, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> indices_2to1;
   Eigen::Matrix<int, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> distances_2to1;
 
-  FlannMatch(descriptors1, descriptors2, &indices_1to2, &distances_1to2);
+  flann_matcher2.query(flann_matcher1, &indices_1to2, &distances_1to2);
   if (match_options.cross_check) {
-    FlannMatch(descriptors2, descriptors1, &indices_2to1, &distances_2to1);
+    flann_matcher1.query(flann_matcher2, &indices_2to1, &distances_2to1);
   }
 
   FindBestMatches(indices_1to2, distances_1to2,
@@ -983,13 +1012,21 @@ void MatchSiftFeaturesCPUFLANN(const SiftMatchingOptions& match_options,
                   match_options.cross_check, matches);
 }
 
+void MatchSiftFeaturesCPUFLANN(const SiftMatchingOptions& match_options,
+                               const FeatureDescriptors& descriptors1,
+                               const FeatureDescriptors& descriptors2,
+                               FeatureMatches* matches) {
+  FlannMatchWrapper fm1to2(descriptors2);
+  FlannMatchWrapper fm2to1(descriptors1);
+  MatchSiftFeaturesCPUFLANN(match_options, fm2to1, fm1to2, matches);
+}
+
 void MatchSiftFeaturesCPU(const SiftMatchingOptions& match_options,
                           const FeatureDescriptors& descriptors1,
                           const FeatureDescriptors& descriptors2,
                           FeatureMatches* matches) {
   MatchSiftFeaturesCPUFLANN(match_options, descriptors1, descriptors2, matches);
 }
-
 
 
 void MatchGuidedSiftFeaturesCPU(const SiftMatchingOptions& match_options,
